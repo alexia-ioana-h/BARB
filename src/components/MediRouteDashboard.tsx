@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { Sun, Moon } from "lucide-react";
+import { Sun, Moon, Network } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { MapContainer, TileLayer, CircleMarker, Circle, Polyline, Tooltip as LTooltip } from "react-leaflet";
+import KnowledgeGraph from "@/components/KnowledgeGraph";
 import {
   NODE_COLORS,
   NODE_TYPE_LABELS,
@@ -261,6 +263,7 @@ function NodeLabel({ label }: { label: string }) {
 
 export default function MediRouteDashboard() {
   const [product, setProduct] = useState<Product>("Insulin");
+  const [graphMode, setGraphMode] = useState<"2d" | "graph">("2d");
   const [viewMode, setViewMode] = useState<"international" | "domestic">("international");
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     if (typeof window !== "undefined") {
@@ -448,20 +451,6 @@ export default function MediRouteDashboard() {
             </div>
           </div>
           <div className="mr-overlay-group">
-            <div className="mr-section-title">View</div>
-            <div className="mr-pills">
-              {(["international", "domestic"] as const).map((m) => (
-                <button
-                  key={m}
-                  className={`mr-pill${viewMode === m ? " active" : ""}`}
-                  onClick={() => setViewMode(m)}
-                >
-                  {m === "international" ? "International" : "Domestic"}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="mr-overlay-group">
             <div className="mr-section-title">Theme</div>
             <div className="mr-pills">
               <button
@@ -480,6 +469,47 @@ export default function MediRouteDashboard() {
               </button>
             </div>
           </div>
+          <div className="mr-overlay-group">
+            <div className="mr-section-title">Display</div>
+            <div className="mr-pills">
+              <button
+                className={`mr-pill${graphMode === "2d" ? " active" : ""}`}
+                onClick={() => setGraphMode("2d")}
+              >
+                Map
+              </button>
+              <button
+                className={`mr-pill${graphMode === "graph" ? " active" : ""}`}
+                onClick={() => setGraphMode("graph")}
+              >
+                Graph
+              </button>
+            </div>
+          </div>
+          <div className="mr-overlay-group">
+            <div className="mr-section-title">3D View</div>
+            <Link
+              to="/graph3d"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                padding: "4px 10px",
+                borderRadius: 6,
+                border: "1px solid rgba(59,130,246,0.45)",
+                background: "rgba(59,130,246,0.12)",
+                color: "#93c5fd",
+                textDecoration: "none",
+                fontSize: 12,
+                fontWeight: 600,
+                letterSpacing: "0.02em",
+                whiteSpace: "nowrap",
+              }}
+            >
+              <Network size={13} />
+              3D Graph
+            </Link>
+          </div>
         </div>
 
         <div className="mr-legend">
@@ -491,7 +521,17 @@ export default function MediRouteDashboard() {
           ))}
         </div>
 
-        <MapContainer
+        {graphMode === "graph" ? (
+          <KnowledgeGraph
+            nodes={nodes}
+            edges={edges}
+            disruptedSet={disruptedSet}
+            activeWarning={activeWarning !== null}
+            theme={theme}
+            product={product}
+          />
+        ) : null}
+        {graphMode === "2d" && <MapContainer
           center={[54, -2]}
           zoom={6}
           style={{ width: "100%", height: "100%" }}
@@ -643,7 +683,7 @@ export default function MediRouteDashboard() {
                 <NodeLabel label={n.label} />
               </CircleMarker>
           ))}
-        </MapContainer>
+        </MapContainer>}
 
         <div
           className={`mr-bottom${panelOpen ? " open" : ""}`}
