@@ -203,9 +203,14 @@ function useRoadGeometries(
 
 // ---------------- Agent recommendations ----------------
 
-interface Recommendation {
-  id: string; // warningId::edgeKey
+interface BaseRec {
+  id: string;
   warningId: string;
+  rationale: string;
+}
+
+interface RerouteRec extends BaseRec {
+  type: "reroute";
   edgeKey: string;
   sourceLabel: string;
   targetLabel: string;
@@ -214,8 +219,49 @@ interface Recommendation {
   altMin: number;
   delayDeltaMin: number;
   costDeltaGBP: number;
-  rationale: string;
-  via: string; // human waypoint description
+  via: string;
+}
+
+interface AltSupplierRec extends BaseRec {
+  type: "alt-supplier";
+  supplierName: string;
+  supplierCountry: string;
+  leadTimeDays: number;
+  costDeltaGBP: number;
+  capacity: string;
+}
+
+interface DelayRec extends BaseRec {
+  type: "delay";
+  edgeKey: string;
+  sourceLabel: string;
+  targetLabel: string;
+  recommendedDelayHours: number;
+  maxSafeDelayHours: number;
+  stockBufferDays: number;
+  costSavingGBP: number;
+}
+
+type Recommendation = RerouteRec | AltSupplierRec | DelayRec;
+
+const ALT_SUPPLIERS: Record<string, { name: string; country: string; leadTimeDays: number; costDeltaGBP: number; capacity: string }[]> = {
+  Insulin: [
+    { name: "Novo Nordisk Chartres", country: "France", leadTimeDays: 3, costDeltaGBP: 1200, capacity: "120% demand coverage" },
+    { name: "Eli Lilly Cork", country: "Ireland", leadTimeDays: 2, costDeltaGBP: 800, capacity: "85% demand coverage" },
+    { name: "Sanofi Frankfurt", country: "Germany", leadTimeDays: 4, costDeltaGBP: 950, capacity: "Full coverage" },
+    { name: "Wockhardt Wrexham", country: "UK", leadTimeDays: 1, costDeltaGBP: 1800, capacity: "60% demand coverage" },
+  ],
+  "IV Saline": [
+    { name: "B. Braun Melsungen", country: "Germany", leadTimeDays: 5, costDeltaGBP: 2200, capacity: "90% demand coverage" },
+    { name: "Fresenius Kabi Graz", country: "Austria", leadTimeDays: 6, costDeltaGBP: 1900, capacity: "75% demand coverage" },
+    { name: "Baxter Castlebar", country: "Ireland", leadTimeDays: 3, costDeltaGBP: 1400, capacity: "Full coverage" },
+    { name: "ICU Medical San Clemente", country: "USA", leadTimeDays: 9, costDeltaGBP: 3500, capacity: "110% demand coverage" },
+  ],
+};
+
+function seededRand(seed: number): number {
+  const x = Math.sin(seed + 1) * 10000;
+  return x - Math.floor(x);
 }
 
 interface Decision {
@@ -316,17 +362,17 @@ export default function MediRouteDashboard() {
     for (const recs of Object.values(recsByWarning)) {
       for (const r of recs) {
         const d = decisions[r.id];
-        if (d?.status === "approved") out[r.edgeKey] = r.altCoords;
+        if (d?.status === "approved" && r.type === "reroute") out[r.edgeKey] = r.altCoords;
       }
     }
     return out;
   }, [recsByWarning, decisions]);
 
-  const previewRec = useMemo(() => {
+  const previewRec = useMemo((): RerouteRec | null => {
     if (!selectedRecId) return null;
     for (const recs of Object.values(recsByWarning)) {
       const r = recs.find((x) => x.id === selectedRecId);
-      if (r) return r;
+      if (r && r.type === "reroute") return r;
     }
     return null;
   }, [selectedRecId, recsByWarning]);
@@ -340,54 +386,42 @@ export default function MediRouteDashboard() {
     if (!w) return;
     setGenerating((g) => ({ ...g, [warningId]: true }));
     const out: Recommendation[] = [];
+
+    const fallbackNodes = Object.fromEntries(
+      [...getNodes("Insulin"), ...getNodes("IV Saline")].map((n) => [n.id, n]),
+    );
+
     for (const edgeKey of w.disrupts) {
       const [sId, tId] = edgeKey.split("->");
-      const s = nodeMap[sId];
-      const t = nodeMap[tId];
-      // Try across both products' node maps so warnings always resolve
-      const fallbackNodes = Object.fromEntries(
-        [...getNodes("Insulin"), ...getNodes("IV Saline")].map((n) => [n.id, n]),
-      );
-      const src = s ?? fallbackNodes[sId];
-      const tgt = t ?? fallbackNodes[tId];
+      const src = nodeMap[sId] ?? fallbackNodes[sId];
+      const tgt = nodeMap[tId] ?? fallbackNodes[tId];
       if (!src || !tgt) continue;
 
-      // baseline (direct)
       const baseline = await fetchOsrmRoute([src, tgt]);
-      // detour via waypoint outside the geofence
       const wp = detourWaypoint(src, tgt, w);
       const alt = await fetchOsrmRoute([src, wp, tgt]);
 
-      // fallback synth values if OSRM fails (e.g. cross-channel)
       const baselineMin = baseline ? Math.round(baseline.durationSec / 60) : 120;
-      const altMin = alt
-        ? Math.round(alt.durationSec / 60)
-        : Math.round(baselineMin * 1.35);
+      const altMin = alt ? Math.round(alt.durationSec / 60) : Math.round(baselineMin * 1.35);
       const delayDeltaMin = Math.max(5, altMin - baselineMin);
 
-      // Cost model: incremental £/min driving + extra distance fuel
       // £1.10/min HGV labour+truck + £0.42/km diesel & wear
       const distanceKmDelta = alt && baseline
         ? Math.max(0, (alt.distanceM - baseline.distanceM) / 1000)
-        : delayDeltaMin * 1.1; // approx
+        : delayDeltaMin * 1.1;
       const costDeltaGBP = Math.round(delayDeltaMin * 1.1 + distanceKmDelta * 0.42);
 
-      const altCoords =
-        alt?.coords ?? [
-          [src.lat, src.lng],
-          [wp.lat, wp.lng],
-          [tgt.lat, tgt.lng],
-        ];
+      const altCoords: [number, number][] = alt?.coords ?? [
+        [src.lat, src.lng],
+        [wp.lat, wp.lng],
+        [tgt.lat, tgt.lng],
+      ];
 
       const via = approxPlaceName(wp);
-      const rationale =
-        `Re-routed via ${via} to bypass the ${w.kind} geofence (` +
-        `${w.radiusKm} km radius, ${w.severity}). Adds ~${delayDeltaMin} min ` +
-        `but keeps the corridor open during the ${w.duration} window.`;
-
       out.push({
         id: `${w.id}::${edgeKey}`,
         warningId: w.id,
+        type: "reroute",
         edgeKey,
         sourceLabel: src.label,
         targetLabel: tgt.label,
@@ -396,10 +430,59 @@ export default function MediRouteDashboard() {
         altMin,
         delayDeltaMin,
         costDeltaGBP,
-        rationale,
         via,
+        rationale:
+          `Re-routed via ${via} to bypass the ${w.kind} geofence (` +
+          `${w.radiusKm} km radius, ${w.severity}). Adds ~${delayDeltaMin} min ` +
+          `but keeps the corridor open during the ${w.duration} window.`,
       });
     }
+
+    // --- Alternative supplier suggestions ---
+    const seed = w.id.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+    const suppliers = ALT_SUPPLIERS[product] ?? ALT_SUPPLIERS["Insulin"];
+    const si1 = Math.floor(seededRand(seed) * suppliers.length);
+    const s1 = suppliers[si1];
+    const remaining = suppliers.filter((_, i) => i !== si1);
+    const s2 = remaining[Math.floor(seededRand(seed + 7) * remaining.length)];
+    [s1, s2].forEach((sup, i) => {
+      out.push({
+        id: `${w.id}::alt-supplier-${i}`,
+        warningId: w.id,
+        type: "alt-supplier",
+        supplierName: sup.name,
+        supplierCountry: sup.country,
+        leadTimeDays: sup.leadTimeDays,
+        costDeltaGBP: sup.costDeltaGBP,
+        capacity: sup.capacity,
+        rationale: `Switching to ${sup.name} (${sup.country}) avoids the ${w.kind}-affected corridor entirely. Lead time ${sup.leadTimeDays} d with ${sup.capacity}.`,
+      });
+    });
+
+    // --- Delay recommendation ---
+    const delayOptions = [12, 24, 36, 48];
+    const recommendedDelayHours = delayOptions[Math.floor(seededRand(seed + 1) * delayOptions.length)];
+    const maxSafeDelayHours = recommendedDelayHours + [12, 24, 36][Math.floor(seededRand(seed + 2) * 3)];
+    const stockBufferDays = 3 + Math.floor(seededRand(seed + 3) * 6);
+    const costSavingGBP = Math.round(800 + seededRand(seed + 4) * 2400);
+    const firstEdge = w.disrupts[0];
+    const [fsId, ftId] = firstEdge.split("->");
+    const fSrc = nodeMap[fsId] ?? fallbackNodes[fsId];
+    const fTgt = nodeMap[ftId] ?? fallbackNodes[ftId];
+    out.push({
+      id: `${w.id}::delay`,
+      warningId: w.id,
+      type: "delay",
+      edgeKey: firstEdge,
+      sourceLabel: fSrc?.label ?? fsId,
+      targetLabel: fTgt?.label ?? ftId,
+      recommendedDelayHours,
+      maxSafeDelayHours,
+      stockBufferDays,
+      costSavingGBP,
+      rationale: `Current stock buffer of ${stockBufferDays} days permits holding this shipment up to ${maxSafeDelayHours} h. Waiting ${recommendedDelayHours} h avoids peak ${w.kind} conditions and saves an estimated £${costSavingGBP.toLocaleString()} in emergency logistics costs.`,
+    });
+
     setRecsByWarning((m) => ({ ...m, [warningId]: out }));
     setGenerating((g) => ({ ...g, [warningId]: false }));
   }
@@ -850,17 +933,34 @@ export default function MediRouteDashboard() {
                           {recs.map((r) => {
                             const d = decisions[r.id];
                             const isRejecting = rejectingId === r.id;
+                            const TYPE_META = {
+                              reroute:       { label: "REROUTE",      color: "#F97316" },
+                              "alt-supplier":{ label: "ALT SUPPLIER", color: "#8B5CF6" },
+                              delay:         { label: "DELAY",        color: "#14B8A6" },
+                            };
+                            const { label: typeLabel, color: typeColor } = TYPE_META[r.type];
+                            const approveLabel =
+                              r.type === "reroute"       ? "Approve & lock route"      :
+                              r.type === "alt-supplier"  ? "Approve & switch supplier" :
+                                                           "Approve & hold shipment";
+                            const cardTitle =
+                              r.type === "alt-supplier"
+                                ? r.supplierName
+                                : `${r.sourceLabel} → ${r.targetLabel}`;
                             return (
                               <div
                                 key={r.id}
                                 className={`mr-rec${d ? ` ${d.status}` : ""}${selectedRecId === r.id ? " selected" : ""}`}
                                 onClick={() =>
-                                  setSelectedRecId((cur) => (cur === r.id ? null : r.id))
+                                  r.type === "reroute"
+                                    ? setSelectedRecId((cur) => (cur === r.id ? null : r.id))
+                                    : undefined
                                 }
                               >
                                 <div className="mr-rec-head">
-                                  <span className="mr-rec-route">
-                                    {r.sourceLabel} → {r.targetLabel}
+                                  <span className="mr-rec-route">{cardTitle}</span>
+                                  <span style={{ fontSize: 9, fontWeight: 700, background: typeColor + "22", color: typeColor, padding: "2px 5px", borderRadius: 4, flexShrink: 0 }}>
+                                    {typeLabel}
                                   </span>
                                   {d ? (
                                     <span className={`mr-rec-status ${d.status}`}>
@@ -871,22 +971,29 @@ export default function MediRouteDashboard() {
                                   )}
                                 </div>
                                 <div className="mr-rec-stats">
-                                  <div>
-                                    <span>Detour via</span>
-                                    <b>{r.via}</b>
-                                  </div>
-                                  <div>
-                                    <span>Δ time</span>
-                                    <b className="mono" style={{ color: "#F97316" }}>
-                                      +{r.delayDeltaMin} min
-                                    </b>
-                                  </div>
-                                  <div>
-                                    <span>Δ cost</span>
-                                    <b className="mono" style={{ color: "#F97316" }}>
-                                      +£{r.costDeltaGBP}
-                                    </b>
-                                  </div>
+                                  {r.type === "reroute" && (
+                                    <>
+                                      <div><span>Detour via</span><b>{r.via}</b></div>
+                                      <div><span>Δ time</span><b className="mono" style={{ color: "#F97316" }}>+{r.delayDeltaMin} min</b></div>
+                                      <div><span>Δ cost</span><b className="mono" style={{ color: "#F97316" }}>+£{r.costDeltaGBP}</b></div>
+                                    </>
+                                  )}
+                                  {r.type === "alt-supplier" && (
+                                    <>
+                                      <div><span>Country</span><b>{r.supplierCountry}</b></div>
+                                      <div><span>Lead time</span><b className="mono" style={{ color: "#8B5CF6" }}>{r.leadTimeDays} days</b></div>
+                                      <div><span>Capacity</span><b>{r.capacity}</b></div>
+                                      <div><span>Δ cost</span><b className="mono" style={{ color: "#F97316" }}>+£{r.costDeltaGBP.toLocaleString()}</b></div>
+                                    </>
+                                  )}
+                                  {r.type === "delay" && (
+                                    <>
+                                      <div><span>Hold for</span><b className="mono" style={{ color: "#14B8A6" }}>{r.recommendedDelayHours} h</b></div>
+                                      <div><span>Max safe</span><b className="mono">{r.maxSafeDelayHours} h</b></div>
+                                      <div><span>Stock buffer</span><b className="mono">{r.stockBufferDays} days</b></div>
+                                      <div><span>Est. saving</span><b className="mono" style={{ color: "#22C55E" }}>£{r.costSavingGBP.toLocaleString()}</b></div>
+                                    </>
+                                  )}
                                 </div>
                                 <p className="mr-rec-rationale">{r.rationale}</p>
                                 {d?.status === "approved" && (
@@ -897,7 +1004,7 @@ export default function MediRouteDashboard() {
                                 {d?.status === "rejected" && (
                                   <div className="mr-rec-decision">
                                     Dismissed {new Date(d.at).toLocaleTimeString()}
-                                    {d.reason ? ` — “${d.reason}”` : ""}
+                                    {d.reason ? ` — "${d.reason}"` : ""}
                                   </div>
                                 )}
                                 {!d && !isRejecting && (
@@ -906,7 +1013,7 @@ export default function MediRouteDashboard() {
                                       className="mr-btn approve"
                                       onClick={() => approveRec(r)}
                                     >
-                                      Approve & lock route
+                                      {approveLabel}
                                     </button>
                                     <button
                                       className="mr-btn reject"
