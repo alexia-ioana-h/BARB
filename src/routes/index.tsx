@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
-import MediRouteDashboard from "@/components/MediRouteDashboard";
+import { lazy, Suspense, useEffect, useState } from "react";
+
+const MediRouteDashboard = lazy(() => import("@/components/MediRouteDashboard"));
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -18,5 +19,9 @@ function Index() {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   if (!mounted) return <div style={{ width: "100vw", height: "100vh", background: "#0f1117" }} />;
-  return <MediRouteDashboard />;
+  return (
+    <Suspense fallback={<div style={{ width: "100vw", height: "100vh", background: "#0f1117" }} />}>
+      <MediRouteDashboard />
+    </Suspense>
+  );
 }
