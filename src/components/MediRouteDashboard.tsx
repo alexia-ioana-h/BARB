@@ -1,8 +1,9 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { Sun, Moon, Network } from "lucide-react";
+import { Sun, Moon, Network, FileUp } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { MapContainer, TileLayer, CircleMarker, Circle, Polyline, Tooltip as LTooltip } from "react-leaflet";
 import KnowledgeGraph from "@/components/KnowledgeGraph";
+import DocumentIngestion from "@/components/DocumentIngestion";
 import {
   NODE_COLORS,
   NODE_TYPE_LABELS,
@@ -278,6 +279,9 @@ export default function MediRouteDashboard() {
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [ingestOpen, setIngestOpen] = useState(false);
+  const [extraNodes, setExtraNodes] = useState<{ id: string; label: string; type: string; lat: number; lng: number }[]>([]);
+  const [extraEdges, setExtraEdges] = useState<{ sourceId: string; targetId: string; volume: number; flood_risk: number }[]>([]);
   const [selectedRecId, setSelectedRecId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -294,8 +298,8 @@ export default function MediRouteDashboard() {
     [activeWarning],
   );
 
-  const nodes = useMemo(() => getNodes(product), [product]);
-  const allEdges = useMemo(() => getEdges(product), [product]);
+  const nodes = useMemo(() => [...getNodes(product), ...extraNodes], [product, extraNodes]);
+  const allEdges = useMemo(() => [...getEdges(product), ...extraEdges], [product, extraEdges]);
   const nodeMap = useMemo(() => Object.fromEntries(nodes.map((n) => [n.id, n])), [nodes]);
 
   // In domestic mode hide all international legs (manufacturer → export port / sea).
@@ -485,6 +489,33 @@ export default function MediRouteDashboard() {
                 Graph
               </button>
             </div>
+          </div>
+          <div className="mr-overlay-group">
+            <div className="mr-section-title">Data</div>
+            <button
+              className="mr-pill"
+              onClick={() => setIngestOpen(true)}
+              title="Ingest supply chain document"
+              style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+            >
+              <FileUp size={13} />
+              Ingest
+              {(extraNodes.length > 0 || extraEdges.length > 0) && (
+                <span
+                  style={{
+                    background: "#3B82F6",
+                    color: "#fff",
+                    borderRadius: 10,
+                    fontSize: 9,
+                    fontWeight: 700,
+                    padding: "1px 5px",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  +{extraNodes.length + extraEdges.length}
+                </span>
+              )}
+            </button>
           </div>
           <div className="mr-overlay-group">
             <div className="mr-section-title">3D View</div>
@@ -722,6 +753,17 @@ export default function MediRouteDashboard() {
           </div>
         </div>
       </div>
+
+      <DocumentIngestion
+        open={ingestOpen}
+        onClose={() => setIngestOpen(false)}
+        existingNodeIds={new Set(nodes.map((n) => n.id))}
+        onImport={(newNodes, newEdges) => {
+          setExtraNodes((prev) => [...prev, ...newNodes]);
+          setExtraEdges((prev) => [...prev, ...newEdges]);
+        }}
+        theme={theme}
+      />
 
       <aside className="mr-warnings">
         <div className="mr-warnings-head">
