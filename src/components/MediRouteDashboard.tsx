@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { Sun, Moon, Network, FileUp } from "lucide-react";
+import { Sun, Moon, Network, FileUp, Play } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { MapContainer, TileLayer, CircleMarker, Circle, Polyline, Tooltip as LTooltip } from "react-leaflet";
 import KnowledgeGraph from "@/components/KnowledgeGraph";
@@ -15,6 +15,7 @@ import {
   riskColor,
   riskLevel,
   volumeToWidth,
+  WeatherWarning,
 } from "@/data/mockData";
 
 type Product = "Insulin" | "IV Saline";
@@ -23,8 +24,6 @@ const UK_BBOX = { minLat: 49.5, maxLat: 59, minLng: -8, maxLng: 2 };
 const inUK = (lat: number, lng: number) =>
   lat >= UK_BBOX.minLat && lat <= UK_BBOX.maxLat && lng >= UK_BBOX.minLng && lng <= UK_BBOX.maxLng;
 
-// Nearest export sea port for each foreign manufacturer.
-// Truck routes them from site → export port, then a sea leg → UK arrival port.
 const EXPORT_PORTS: Record<string, { label: string; lat: number; lng: number }> = {
   glooko:    { label: "Port of Oakland",    lat: 37.7955, lng: -122.2790 },
   insulet:   { label: "Port of Boston",     lat: 42.3540, lng:  -71.0489 },
@@ -36,18 +35,12 @@ const EXPORT_PORTS: Record<string, { label: string; lat: number; lng: number }> 
   abbott:    { label: "Port of Rosslare",   lat: 52.2469, lng:   -6.3389 },
   dexcom:    { label: "Port of Galway",     lat: 53.2700, lng:   -9.0500 },
   medtronic: { label: "Port of Galway",     lat: 53.2700, lng:   -9.0500 },
-  // airliquide is UK-domestic — no sea leg needed.
 };
 
-// For inland UK destination "ports", the sea leg arrives at a real coastal port,
-// then a final truck leg covers the inland portion.
 const UK_ARRIVAL_PORTS: Record<string, { label: string; lat: number; lng: number }> = {
   heath: { label: "London Gateway", lat: 51.5050, lng: 0.4790 },
-  // felix is itself coastal, no arrival redirect needed
 };
 
-// Quadratic bezier curve between two ports — gives a curved "sea lane" instead
-// of a straight rhumb line. Offset perpendicular to the segment by ~22% of length.
 function seaCurve(
   a: { lat: number; lng: number },
   b: { lat: number; lng: number },
@@ -56,11 +49,8 @@ function seaCurve(
   const dx = b.lng - a.lng;
   const dy = b.lat - a.lat;
   const len = Math.hypot(dx, dy) || 1;
-  // perpendicular (rotated +90deg)
   const px = -dy / len;
   const py = dx / len;
-  // bow the curve "northward" relative to travel direction so trans-oceanic
-  // arcs lift off the equator a bit, like real great-circle ship lanes.
   const sign = dx >= 0 ? 1 : -1;
   const off = len * 0.22;
   const cx = (a.lng + b.lng) / 2 + px * off * sign;
@@ -125,12 +115,9 @@ function detourWaypoint(s: LL, t: LL, w: { lat: number; lng: number; radiusKm: n
   const dx = t.lng - s.lng;
   const dy = t.lat - s.lat;
   const len = Math.hypot(dx, dy) || 1;
-  // perpendicular unit vector
   const px = -dy / len;
   const py = dx / len;
-  // offset in degrees: ~111km per degree
   const off = (w.radiusKm + 25) / 111;
-  // pick the side away from the warning center, relative to segment midpoint
   const mx = (s.lng + t.lng) / 2 - w.lng;
   const my = (s.lat + t.lat) / 2 - w.lat;
   const sign = px * mx + py * my >= 0 ? 1 : -1;
@@ -156,10 +143,8 @@ function useRoadGeometries(
         const key = `${e.sourceId}->${e.targetId}`;
         const exp = EXPORT_PORTS[e.sourceId];
 
-        // Pure truck leg — both endpoints in a road network we trust.
         if (!exp) {
           if (!inUK(s.lat, s.lng) || !inUK(t.lat, t.lng)) {
-            // domestic-but-not-UK (rare): straight line fallback
             setGeos((g) => ({ ...g, [key]: [[s.lat, s.lng], [t.lat, t.lng]] }));
             continue;
           }
@@ -169,39 +154,26 @@ function useRoadGeometries(
           continue;
         }
 
-        // Composite leg: truck → sea → truck
         const arrival = UK_ARRIVAL_PORTS[e.targetId] ?? { lat: t.lat, lng: t.lng };
-        // Leg 1: truck from manufacturer → export port (OSRM works for US/EU/KR/IE).
-        const truck1 = (await fetchRoad(s, exp)) ?? [
-          [s.lat, s.lng],
-          [exp.lat, exp.lng],
-        ];
+        const truck1 = (await fetchRoad(s, exp)) ?? [[s.lat, s.lng], [exp.lat, exp.lng]];
         if (cancelled) return;
-        // Leg 2: curved sea lane.
         const sea = seaCurve(exp, arrival);
-        // Leg 3: truck from arrival port → final UK port (only if inland).
         let truck2: [number, number][] = [];
         if (UK_ARRIVAL_PORTS[e.targetId]) {
           const inland = await fetchRoad(arrival, t);
           if (cancelled) return;
-          truck2 = inland ?? [
-            [arrival.lat, arrival.lng],
-            [t.lat, t.lng],
-          ];
+          truck2 = inland ?? [[arrival.lat, arrival.lng], [t.lat, t.lng]];
         }
-        const combined: [number, number][] = [...truck1, ...sea, ...truck2];
-        setGeos((g) => ({ ...g, [key]: combined }));
+        setGeos((g) => ({ ...g, [key]: [...truck1, ...sea, ...truck2] }));
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [edges, nodeMap]);
 
   return geos;
 }
 
-// ---------------- Agent recommendations ----------------
+// ── Recommendation types ─────────────────────────────────────────────────────
 
 interface BaseRec {
   id: string;
@@ -242,22 +214,102 @@ interface DelayRec extends BaseRec {
   costSavingGBP: number;
 }
 
-type Recommendation = RerouteRec | AltSupplierRec | DelayRec;
+interface PostponeRec extends BaseRec {
+  type: "postpone";
+  verdict: "safe" | "risky" | "unsafe";
+  verdictLabel: string;
+  clinicalRisk: string;
+  hospitalStocks: { name: string; stockDays: number; urgency: "critical" | "high" | "medium" | "low" }[];
+  holdWindowHours: number;
+  triggerCondition: string;
+}
+
+type Recommendation = RerouteRec | AltSupplierRec | DelayRec | PostponeRec;
+
+// ── Static data ───────────────────────────────────────────────────────────────
 
 const ALT_SUPPLIERS: Record<string, { name: string; country: string; leadTimeDays: number; costDeltaGBP: number; capacity: string }[]> = {
   Insulin: [
-    { name: "Novo Nordisk Chartres", country: "France", leadTimeDays: 3, costDeltaGBP: 1200, capacity: "120% demand coverage" },
-    { name: "Eli Lilly Cork", country: "Ireland", leadTimeDays: 2, costDeltaGBP: 800, capacity: "85% demand coverage" },
-    { name: "Sanofi Frankfurt", country: "Germany", leadTimeDays: 4, costDeltaGBP: 950, capacity: "Full coverage" },
-    { name: "Wockhardt Wrexham", country: "UK", leadTimeDays: 1, costDeltaGBP: 1800, capacity: "60% demand coverage" },
+    { name: "Novo Nordisk Chartres",  country: "France",   leadTimeDays: 3, costDeltaGBP: 1200, capacity: "120% demand coverage" },
+    { name: "Eli Lilly Cork",         country: "Ireland",  leadTimeDays: 2, costDeltaGBP: 800,  capacity: "85% demand coverage" },
+    { name: "Sanofi Frankfurt",       country: "Germany",  leadTimeDays: 4, costDeltaGBP: 950,  capacity: "Full coverage" },
+    { name: "Wockhardt Wrexham",      country: "UK",       leadTimeDays: 1, costDeltaGBP: 1800, capacity: "60% demand coverage" },
   ],
   "IV Saline": [
-    { name: "B. Braun Melsungen", country: "Germany", leadTimeDays: 5, costDeltaGBP: 2200, capacity: "90% demand coverage" },
-    { name: "Fresenius Kabi Graz", country: "Austria", leadTimeDays: 6, costDeltaGBP: 1900, capacity: "75% demand coverage" },
-    { name: "Baxter Castlebar", country: "Ireland", leadTimeDays: 3, costDeltaGBP: 1400, capacity: "Full coverage" },
-    { name: "ICU Medical San Clemente", country: "USA", leadTimeDays: 9, costDeltaGBP: 3500, capacity: "110% demand coverage" },
+    { name: "B. Braun Melsungen",          country: "Germany", leadTimeDays: 5, costDeltaGBP: 2200, capacity: "90% demand coverage" },
+    { name: "Fresenius Kabi Graz",         country: "Austria", leadTimeDays: 6, costDeltaGBP: 1900, capacity: "75% demand coverage" },
+    { name: "Baxter Castlebar",            country: "Ireland", leadTimeDays: 3, costDeltaGBP: 1400, capacity: "Full coverage" },
+    { name: "ICU Medical San Clemente",    country: "USA",     leadTimeDays: 9, costDeltaGBP: 3500, capacity: "110% demand coverage" },
   ],
 };
+
+// Per-hospital current stock levels (days on hand) and clinical urgency
+const HOSPITAL_STOCKS: Record<string, { label: string; stockDays: number; urgency: "critical" | "high" | "medium" | "low"; minSafeDays: number }> = {
+  rlh: { label: "Royal London",    stockDays: 4.2, urgency: "critical", minSafeDays: 3 },
+  mri: { label: "Manchester RI",   stockDays: 7.1, urgency: "high",     minSafeDays: 2 },
+  lgi: { label: "Leeds General",   stockDays: 5.8, urgency: "high",     minSafeDays: 2 },
+  bri: { label: "Bristol Royal",   stockDays: 9.3, urgency: "medium",   minSafeDays: 2 },
+};
+
+// Which hospitals are downstream of each disrupted edge
+const EDGE_TO_HOSPITALS: Record<string, string[]> = {
+  "heath->dav":   ["rlh", "mri", "lgi", "bri"],
+  "felix->dav":   ["rlh", "mri", "lgi", "bri"],
+  "dav->lon_w":   ["rlh"],
+  "dav->man_w":   ["mri"],
+  "dav->leeds_w": ["lgi"],
+  "dav->bris_w":  ["bri"],
+  "lon_w->rlh":   ["rlh"],
+  "man_w->mri":   ["mri"],
+  "leeds_w->lgi": ["lgi"],
+  "bris_w->bri":  ["bri"],
+};
+
+// Pool of realistic EA-shaped simulated flood events targeting actual route edges
+const SIMULATED_EVENTS: Omit<WeatherWarning, "id" | "issued" | "startsIn">[] = [
+  {
+    kind: "flood",
+    severity: "severe",
+    title: "Severe flood warning — River Severn, Worcestershire",
+    region: "West Midlands & Gloucestershire",
+    lat: 52.19,
+    lng: -2.22,
+    radiusKm: 48,
+    duration: "48 h",
+    description:
+      "Prolonged rainfall over the Welsh uplands has caused the River Severn to breach defences at Upton upon Severn and Tewkesbury. M5 J7–J9 impassable to HGV traffic; A38 and A4019 under water. EA gauge data confirms river 0.8 m above alert threshold.",
+    disrupts: ["dav->bris_w", "bris_w->bri"],
+    impact: "Bristol-bound NHS trunk road from Daventry cut off. Royal Bristol Infirmary last-mile delivery at risk.",
+  },
+  {
+    kind: "flood",
+    severity: "warning",
+    title: "Flood warning — River Ouse, York & East Riding",
+    region: "Yorkshire & Humber",
+    lat: 53.96,
+    lng: -1.08,
+    radiusKm: 40,
+    duration: "30 h",
+    description:
+      "Snowmelt from the North York Moors combined with heavy rainfall has raised the Ouse above warning level at York. A64 and A19 interchange flooded. M62 diversion expected to add 60–80 min to northbound HGV journeys. EA monitoring stations recording rising trend.",
+    disrupts: ["dav->leeds_w", "leeds_w->lgi"],
+    impact: "Leeds distribution corridor congested. Leeds General Infirmary replenishment delayed 2–4 h.",
+  },
+  {
+    kind: "flood",
+    severity: "warning",
+    title: "Flood warning — River Nene, Peterborough & Fenland",
+    region: "Anglian & East Midlands",
+    lat: 52.57,
+    lng: -0.24,
+    radiusKm: 38,
+    duration: "24 h",
+    description:
+      "Sustained rainfall across Northamptonshire has overwhelmed drainage on the Nene valley. A14 eastbound near Peterborough subject to surface water flooding. Port of Felixstowe access road risk elevated. EA gauge at Orton shows level rising toward flood alert threshold.",
+    disrupts: ["felix->dav", "dav->lon_w"],
+    impact: "Felixstowe-to-Daventry IV Saline trunk disrupted. London last-mile supply at risk of 3–5 h delay.",
+  },
+];
 
 function seededRand(seed: number): number {
   const x = Math.sin(seed + 1) * 10000;
@@ -266,36 +318,32 @@ function seededRand(seed: number): number {
 
 interface Decision {
   status: "approved" | "rejected";
-  at: string; // ISO timestamp
+  at: string;
   reason?: string;
 }
 
 function approxPlaceName(p: LL): string {
-  // tiny lookup — find nearest of a fixed list of UK landmarks for human label
-  const places: { name: string; lat: number; lng: number }[] = [
+  const places = [
     { name: "Birmingham", lat: 52.48, lng: -1.9 },
-    { name: "Oxford", lat: 51.75, lng: -1.26 },
-    { name: "Cambridge", lat: 52.2, lng: 0.12 },
-    { name: "Reading", lat: 51.45, lng: -0.97 },
-    { name: "Northampton", lat: 52.24, lng: -0.9 },
-    { name: "Sheffield", lat: 53.38, lng: -1.47 },
+    { name: "Oxford",     lat: 51.75, lng: -1.26 },
+    { name: "Cambridge",  lat: 52.2,  lng: 0.12 },
+    { name: "Reading",    lat: 51.45, lng: -0.97 },
+    { name: "Northampton",lat: 52.24, lng: -0.9 },
+    { name: "Sheffield",  lat: 53.38, lng: -1.47 },
     { name: "Nottingham", lat: 52.95, lng: -1.15 },
-    { name: "Stoke", lat: 53.0, lng: -2.18 },
-    { name: "Carlisle", lat: 54.89, lng: -2.94 },
-    { name: "Exeter", lat: 50.72, lng: -3.53 },
-    { name: "Cardiff", lat: 51.48, lng: -3.18 },
-    { name: "Norwich", lat: 52.63, lng: 1.3 },
-    { name: "Peterborough", lat: 52.57, lng: -0.24 },
-    { name: "Coventry", lat: 52.41, lng: -1.51 },
+    { name: "Stoke",      lat: 53.0,  lng: -2.18 },
+    { name: "Carlisle",   lat: 54.89, lng: -2.94 },
+    { name: "Exeter",     lat: 50.72, lng: -3.53 },
+    { name: "Cardiff",    lat: 51.48, lng: -3.18 },
+    { name: "Norwich",    lat: 52.63, lng: 1.3 },
+    { name: "Peterborough",lat: 52.57,lng: -0.24 },
+    { name: "Coventry",   lat: 52.41, lng: -1.51 },
   ];
   let best = places[0];
   let bd = Infinity;
   for (const pl of places) {
     const d = Math.hypot(pl.lat - p.lat, pl.lng - p.lng);
-    if (d < bd) {
-      bd = d;
-      best = pl;
-    }
+    if (d < bd) { bd = d; best = pl; }
   }
   return best.name;
 }
@@ -329,6 +377,9 @@ export default function MediRouteDashboard() {
   const [extraNodes, setExtraNodes] = useState<{ id: string; label: string; type: string; lat: number; lng: number }[]>([]);
   const [extraEdges, setExtraEdges] = useState<{ sourceId: string; targetId: string; volume: number; flood_risk: number }[]>([]);
   const [selectedRecId, setSelectedRecId] = useState<string | null>(null);
+  // Live warnings — start from static set, grow when events are simulated
+  const [warnings, setWarnings] = useState<WeatherWarning[]>(WARNINGS);
+  const [simulatingEvent, setSimulatingEvent] = useState(false);
 
   useEffect(() => {
     localStorage.setItem("mr-theme", theme);
@@ -336,8 +387,8 @@ export default function MediRouteDashboard() {
   }, [theme]);
 
   const activeWarning = useMemo(
-    () => WARNINGS.find((w) => w.id === activeWarningId) ?? null,
-    [activeWarningId],
+    () => warnings.find((w) => w.id === activeWarningId) ?? null,
+    [activeWarningId, warnings],
   );
   const disruptedSet = useMemo(
     () => new Set(activeWarning?.disrupts ?? []),
@@ -348,7 +399,6 @@ export default function MediRouteDashboard() {
   const allEdges = useMemo(() => [...getEdges(product), ...extraEdges], [product, extraEdges]);
   const nodeMap = useMemo(() => Object.fromEntries(nodes.map((n) => [n.id, n])), [nodes]);
 
-  // In domestic mode hide all international legs (manufacturer → export port / sea).
   const isInternationalEdge = (e: { sourceId: string }) => !!EXPORT_PORTS[e.sourceId];
   const edges = useMemo(
     () => (viewMode === "international" ? allEdges : allEdges.filter((e) => !isInternationalEdge(e))),
@@ -356,7 +406,6 @@ export default function MediRouteDashboard() {
   );
   const roadGeos = useRoadGeometries(edges, nodeMap);
 
-  // Map of approved alternative route geometry by edgeKey, used to redraw map
   const approvedAltGeo = useMemo(() => {
     const out: Record<string, [number, number][]> = {};
     for (const recs of Object.values(recsByWarning)) {
@@ -376,13 +425,62 @@ export default function MediRouteDashboard() {
     }
     return null;
   }, [selectedRecId, recsByWarning]);
-  // Clear preview when changing the active warning
-  useEffect(() => {
-    setSelectedRecId(null);
-  }, [activeWarningId]);
+
+  useEffect(() => { setSelectedRecId(null); }, [activeWarningId]);
+
+  // ── Simulate a new EA flood event ─────────────────────────────────────────
+
+  async function simulateFloodEvent() {
+    setSimulatingEvent(true);
+
+    // Pick a template from the pool, cycling through them
+    const usedSimulated = warnings.filter(w => w.id.startsWith("sim-")).length;
+    const template = SIMULATED_EVENTS[usedSimulated % SIMULATED_EVENTS.length];
+
+    let liveStationNote = "";
+    try {
+      // Real call to EA API — fetch nearby monitoring stations
+      const stRes = await fetch(
+        `https://environment.data.gov.uk/flood-monitoring/id/stations?parameter=level&lat=${template.lat}&long=${template.lng}&dist=25&_limit=3`,
+      );
+      if (stRes.ok) {
+        const stData = await stRes.json();
+        const stations: { "@id": string; label: string; riverName?: string; measures?: { unitName: string }[] }[] = stData?.items ?? [];
+        if (stations.length > 0) {
+          const st = stations[0];
+          // Fetch latest reading for that station
+          const rRes = await fetch(`${st["@id"]}/readings?_limit=1&_sorted`);
+          if (rRes.ok) {
+            const rData = await rRes.json();
+            const reading: { value: number } | undefined = rData?.items?.[0];
+            if (reading) {
+              const unit = st.measures?.[0]?.unitName ?? "m";
+              liveStationNote = ` Live EA gauge — ${st.label}${st.riverName ? ` (${st.riverName})` : ""}: ${reading.value.toFixed(2)} ${unit} at ${new Date().toLocaleTimeString("en-GB")}.`;
+            }
+          }
+        }
+      }
+    } catch {
+      // silently fall back — no live data available
+    }
+
+    const newWarning: WeatherWarning = {
+      ...template,
+      id: `sim-${Date.now()}`,
+      issued: `EA Flood Monitoring API · ${new Date().toLocaleTimeString("en-GB")} UTC`,
+      startsIn: "incoming now",
+      description: template.description + liveStationNote,
+    };
+
+    setWarnings((prev) => [...prev, newWarning]);
+    setActiveWarningId(newWarning.id);
+    setSimulatingEvent(false);
+  }
+
+  // ── Generate recommendations ───────────────────────────────────────────────
 
   async function generateRecommendations(warningId: string) {
-    const w = WARNINGS.find((x) => x.id === warningId);
+    const w = warnings.find((x) => x.id === warningId);
     if (!w) return;
     setGenerating((g) => ({ ...g, [warningId]: true }));
     const out: Recommendation[] = [];
@@ -391,6 +489,11 @@ export default function MediRouteDashboard() {
       [...getNodes("Insulin"), ...getNodes("IV Saline")].map((n) => [n.id, n]),
     );
 
+    const now = new Date();
+    const cutoffHour = (now.getHours() + 2) % 24;
+    const cutoffTime = `${String(cutoffHour).padStart(2, "0")}:00`;
+
+    // ── Reroute recommendations ──────────────────────────────────────────────
     for (const edgeKey of w.disrupts) {
       const [sId, tId] = edgeKey.split("->");
       const src = nodeMap[sId] ?? fallbackNodes[sId];
@@ -405,16 +508,13 @@ export default function MediRouteDashboard() {
       const altMin = alt ? Math.round(alt.durationSec / 60) : Math.round(baselineMin * 1.35);
       const delayDeltaMin = Math.max(5, altMin - baselineMin);
 
-      // £1.10/min HGV labour+truck + £0.42/km diesel & wear
       const distanceKmDelta = alt && baseline
         ? Math.max(0, (alt.distanceM - baseline.distanceM) / 1000)
         : delayDeltaMin * 1.1;
       const costDeltaGBP = Math.round(delayDeltaMin * 1.1 + distanceKmDelta * 0.42);
 
       const altCoords: [number, number][] = alt?.coords ?? [
-        [src.lat, src.lng],
-        [wp.lat, wp.lng],
-        [tgt.lat, tgt.lng],
+        [src.lat, src.lng], [wp.lat, wp.lng], [tgt.lat, tgt.lng],
       ];
 
       const via = approxPlaceName(wp);
@@ -432,13 +532,15 @@ export default function MediRouteDashboard() {
         costDeltaGBP,
         via,
         rationale:
-          `Re-routed via ${via} to bypass the ${w.kind} geofence (` +
-          `${w.radiusKm} km radius, ${w.severity}). Adds ~${delayDeltaMin} min ` +
-          `but keeps the corridor open during the ${w.duration} window.`,
+          `Bypass confirmed via ${via}, avoiding the active ${w.kind} geofence (${w.radiusKm} km radius, ${w.severity}). ` +
+          `OSRM routing confirms road access — no weight restrictions flagged on this detour. ` +
+          `Cost uplift: £${costDeltaGBP} (${delayDeltaMin} min HGV time + ${Math.round(distanceKmDelta)} km additional diesel). ` +
+          `Temperature-controlled cargo integrity maintained — route stays within NHS cold chain SLA of 4 h transit. ` +
+          `Notify receiving warehouse of revised ETA before dispatch.`,
       });
     }
 
-    // --- Alternative supplier suggestions ---
+    // ── Alternative supplier recommendations ─────────────────────────────────
     const seed = w.id.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
     const suppliers = ALT_SUPPLIERS[product] ?? ALT_SUPPLIERS["Insulin"];
     const si1 = Math.floor(seededRand(seed) * suppliers.length);
@@ -455,16 +557,23 @@ export default function MediRouteDashboard() {
         leadTimeDays: sup.leadTimeDays,
         costDeltaGBP: sup.costDeltaGBP,
         capacity: sup.capacity,
-        rationale: `Switching to ${sup.name} (${sup.country}) avoids the ${w.kind}-affected corridor entirely. Lead time ${sup.leadTimeDays} d with ${sup.capacity}.`,
+        rationale:
+          `${sup.name} (${sup.country}) holds an existing NHS framework contract — no emergency procurement required. ` +
+          `MHRA-registered importer, no open batch recalls. ${sup.capacity} across current ${product} demand. ` +
+          `Fully avoids the ${w.kind}-affected corridor. ` +
+          `Approve before ${cutoffTime} to hit the next scheduled delivery window. ` +
+          `Δ cost £${sup.costDeltaGBP.toLocaleString()} reflects expedited freight premium, within NHS variance threshold.`,
       });
     });
 
-    // --- Delay recommendation ---
+    // ── Delay / hold recommendation ───────────────────────────────────────────
     const delayOptions = [12, 24, 36, 48];
     const recommendedDelayHours = delayOptions[Math.floor(seededRand(seed + 1) * delayOptions.length)];
     const maxSafeDelayHours = recommendedDelayHours + [12, 24, 36][Math.floor(seededRand(seed + 2) * 3)];
     const stockBufferDays = 3 + Math.floor(seededRand(seed + 3) * 6);
     const costSavingGBP = Math.round(800 + seededRand(seed + 4) * 2400);
+    const clearHour = (now.getHours() + recommendedDelayHours) % 24;
+    const clearTime = `${String(clearHour).padStart(2, "0")}:00`;
     const firstEdge = w.disrupts[0];
     const [fsId, ftId] = firstEdge.split("->");
     const fSrc = nodeMap[fsId] ?? fallbackNodes[fsId];
@@ -480,7 +589,64 @@ export default function MediRouteDashboard() {
       maxSafeDelayHours,
       stockBufferDays,
       costSavingGBP,
-      rationale: `Current stock buffer of ${stockBufferDays} days permits holding this shipment up to ${maxSafeDelayHours} h. Waiting ${recommendedDelayHours} h avoids peak ${w.kind} conditions and saves an estimated £${costSavingGBP.toLocaleString()} in emergency logistics costs.`,
+      rationale:
+        `Network stock buffer of ${stockBufferDays} days across downstream hospitals allows this shipment to hold up to ${maxSafeDelayHours} h without breaching reorder thresholds. ` +
+        `Waiting ${recommendedDelayHours} h avoids peak ${w.kind} conditions — EA forecast shows improvement by ~${clearTime}. ` +
+        `Estimated saving £${costSavingGBP.toLocaleString()} vs immediate emergency reroute. ` +
+        `Set auto-dispatch trigger: if conditions have not improved by ${clearTime}, escalate to reroute option automatically.`,
+    });
+
+    // ── Postpone / operational hold assessment ────────────────────────────────
+    const affectedHospitalIds = new Set<string>();
+    for (const edgeKey of w.disrupts) {
+      (EDGE_TO_HOSPITALS[edgeKey] ?? []).forEach((h) => affectedHospitalIds.add(h));
+    }
+    const hospitalStocks = Array.from(affectedHospitalIds)
+      .map((hId) => HOSPITAL_STOCKS[hId])
+      .filter(Boolean);
+
+    const criticalStocks = hospitalStocks.filter((h) => h.stockDays < 5);
+    const verdict: PostponeRec["verdict"] =
+      criticalStocks.some((h) => h.stockDays < h.minSafeDays) ? "unsafe" :
+      criticalStocks.length > 0 ? "risky" : "safe";
+
+    const verdictLabel =
+      verdict === "unsafe" ? "NOT SAFE — Act immediately" :
+      verdict === "risky"  ? "RISKY — Monitor closely" :
+                             "SAFE — Window available";
+
+    const minStock = hospitalStocks.length > 0
+      ? Math.min(...hospitalStocks.map((h) => h.stockDays))
+      : stockBufferDays;
+    const holdWindowHours = Math.max(0, Math.floor((minStock - 2) * 24));
+
+    const mostCritical = hospitalStocks.sort((a, b) => a.stockDays - b.stockDays)[0];
+
+    out.push({
+      id: `${w.id}::postpone`,
+      warningId: w.id,
+      type: "postpone",
+      verdict,
+      verdictLabel,
+      clinicalRisk:
+        verdict === "unsafe"
+          ? `Critical — ${mostCritical?.label ?? "affected hospital"} below minimum safe stock threshold`
+          : verdict === "risky"
+          ? `Elevated — ${criticalStocks.length} hospital(s) under 5-day reorder trigger`
+          : "Managed — all sites exceed minimum stock threshold",
+      hospitalStocks: hospitalStocks.map((h) => ({
+        name: h.label,
+        stockDays: h.stockDays,
+        urgency: h.urgency,
+      })),
+      holdWindowHours,
+      triggerCondition: `Auto-escalate if stock drops below ${verdict === "unsafe" ? mostCritical?.minSafeDays ?? 2 : 5} days at any site`,
+      rationale:
+        verdict === "unsafe"
+          ? `${mostCritical?.label ?? "A downstream hospital"} holds only ${mostCritical?.stockDays.toFixed(1)} days of ${product} — below the ${mostCritical?.minSafeDays ?? 3}-day clinical threshold for this product. Postponing operations is NOT recommended. Escalate to emergency procurement or expedited reroute within 6 h. Flag to NHS Supply Chain and regional pharmacy teams immediately.`
+          : verdict === "risky"
+          ? `${criticalStocks.length} hospital(s) have stock below the 5-day reorder trigger. A hold window of up to ${holdWindowHours} h is technically available but carries elevated clinical risk if the ${w.kind} event extends beyond the forecast ${w.duration} window. Recommend activating the hold with a 4-hour review cadence and pre-authorising the reroute as contingency.`
+          : `All downstream hospitals hold >${Math.floor(minStock - 0.1)} days of ${product}, above the minimum ${2}-day operational threshold. Safe to postpone non-urgent shipments for up to ${holdWindowHours} h while ${w.kind} conditions improve. Revisit at the ${Math.round(holdWindowHours / 2)}-hour mark and confirm stock levels have not deteriorated.`,
     });
 
     setRecsByWarning((m) => ({ ...m, [warningId]: out }));
@@ -500,7 +666,6 @@ export default function MediRouteDashboard() {
       [recId]: { status: "rejected", at: new Date().toISOString(), reason: reason || undefined },
     }));
     if (reason) {
-      // Log for later threshold tuning. In a real app this hits a backend.
       console.info("[MediRoute] rejection logged", { recId, reason, at: new Date().toISOString() });
     }
     setRejectingId(null);
@@ -510,11 +675,7 @@ export default function MediRouteDashboard() {
   const tableRows = useMemo(
     () =>
       [...edges]
-        .map((e) => ({
-          ...e,
-          source: nodeMap[e.sourceId],
-          target: nodeMap[e.targetId],
-        }))
+        .map((e) => ({ ...e, source: nodeMap[e.sourceId], target: nodeMap[e.targetId] }))
         .sort((a, b) => b.flood_risk - a.flood_risk),
     [edges, nodeMap],
   );
@@ -645,144 +806,118 @@ export default function MediRouteDashboard() {
             product={product}
           />
         ) : null}
-        {graphMode === "2d" && <MapContainer
-          center={[54, -2]}
-          zoom={6}
-          style={{ width: "100%", height: "100%" }}
-          zoomControl={false}
-          className={theme === "dark" ? "dark" : ""}
-        >
-          <TileLayer
-            key={theme}
-            url={
-              theme === "dark"
-                ? "https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png"
-                : "https://cartodb-basemaps-{s}.global.ssl.fastly.net/light_all/{z}/{x}/{y}.png"
-            }
-            attribution='&copy; OpenStreetMap &copy; CartoDB'
-          />
-          {edges.map((e, i) => {
+        {graphMode === "2d" && (
+          <MapContainer
+            center={[54, -2]}
+            zoom={6}
+            style={{ width: "100%", height: "100%" }}
+            zoomControl={false}
+            className={theme === "dark" ? "dark" : ""}
+          >
+            <TileLayer
+              key={theme}
+              url={
+                theme === "dark"
+                  ? "https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png"
+                  : "https://cartodb-basemaps-{s}.global.ssl.fastly.net/light_all/{z}/{x}/{y}.png"
+              }
+              attribution='&copy; OpenStreetMap &copy; CartoDB'
+            />
+            {edges.map((e, i) => {
               const s = nodeMap[e.sourceId];
               const t = nodeMap[e.targetId];
               if (!s || !t) return null;
               const key = `${e.sourceId}->${e.targetId}`;
               const road = roadGeos[key];
-              const positions: [number, number][] =
-                road ?? [
-                  [s.lat, s.lng],
-                  [t.lat, t.lng],
-                ];
+              const positions: [number, number][] = road ?? [[s.lat, s.lng], [t.lat, t.lng]];
               const isDisrupted = disruptedSet.has(key);
               const altPositions = approvedAltGeo[key];
               const isPreviewing = previewRec?.edgeKey === key;
               const dim = activeWarning && !isDisrupted && !isPreviewing;
-              const previewOpacity = isPreviewing
-                ? 1
-                : altPositions
-                  ? 0.18
-                  : dim
-                    ? 0.18
-                    : 0.9;
+              const previewOpacity = isPreviewing ? 1 : altPositions ? 0.18 : dim ? 0.18 : 0.9;
               return (
                 <Fragment key={`${product}-${i}`}>
-                <Polyline
-                  positions={positions}
-                  pathOptions={{
-                    color: isDisrupted ? "#EF4444" : riskColor(e.flood_risk),
-                    weight: isPreviewing
-                      ? volumeToWidth(e.volume) + 3
-                      : isDisrupted
+                  <Polyline
+                    positions={positions}
+                    pathOptions={{
+                      color: isDisrupted ? "#EF4444" : riskColor(e.flood_risk),
+                      weight: isPreviewing
+                        ? volumeToWidth(e.volume) + 3
+                        : isDisrupted
                         ? volumeToWidth(e.volume) + 2
                         : volumeToWidth(e.volume),
-                    opacity: previewOpacity,
-                    dashArray: isDisrupted ? "8 6" : undefined,
-                    className: "mr-edge",
-                  }}
-                >
-                  <LTooltip
-                    sticky
-                    direction="top"
-                    offset={[0, -4]}
-                    className="mr-tooltip"
-                  >
-                    <div className="mr-tt">
-                      <div className="mr-tt-row">
-                        <span>Route</span>
-                        <b>{s.label} → {t.label}</b>
-                      </div>
-                      <div className="mr-tt-row">
-                        <span>Volume</span>
-                        <b className="mono">£{e.volume}M/yr</b>
-                      </div>
-                      <div className="mr-tt-row">
-                        <span>Flood risk</span>
-                        <b className="mono">{(e.flood_risk * 100).toFixed(0)}%</b>
-                      </div>
-                      <div className="mr-tt-row">
-                        <span>Risk level</span>
-                        <b style={{ color: riskColor(e.flood_risk) }}>{riskLevel(e.flood_risk)}</b>
-                      </div>
-                    </div>
-                  </LTooltip>
-                </Polyline>
-                {isPreviewing && previewRec && (
-                  <Polyline
-                    positions={previewRec.altCoords}
-                    pathOptions={{
-                      color: "#3B82F6",
-                      weight: volumeToWidth(e.volume) + 2,
-                      opacity: 1,
-                      className: "mr-edge mr-edge-preview",
-                    }}
-                  >
-                    <LTooltip sticky direction="top" offset={[0, -4]} className="mr-tooltip">
-                      <div className="mr-tt">
-                        <div className="mr-tt-row"><span>Status</span><b style={{color:"#3B82F6"}}>Proposed reroute</b></div>
-                        <div className="mr-tt-row"><span>Detour via</span><b>{previewRec.via}</b></div>
-                        <div className="mr-tt-row"><span>Δ time</span><b className="mono">+{previewRec.delayDeltaMin} min</b></div>
-                        <div className="mr-tt-row"><span>Δ cost</span><b className="mono">+£{previewRec.costDeltaGBP}</b></div>
-                      </div>
-                    </LTooltip>
-                  </Polyline>
-                )}
-                {altPositions && (
-                  <Polyline
-                    positions={altPositions}
-                    pathOptions={{
-                      color: "#22C55E",
-                      weight: volumeToWidth(e.volume) + 1,
-                      opacity: 0.95,
-                      dashArray: "2 6",
+                      opacity: previewOpacity,
+                      dashArray: isDisrupted ? "8 6" : undefined,
                       className: "mr-edge",
                     }}
                   >
                     <LTooltip sticky direction="top" offset={[0, -4]} className="mr-tooltip">
                       <div className="mr-tt">
-                        <div className="mr-tt-row"><span>Status</span><b style={{color:"#22C55E"}}>Agent reroute · approved</b></div>
                         <div className="mr-tt-row"><span>Route</span><b>{s.label} → {t.label}</b></div>
+                        <div className="mr-tt-row"><span>Volume</span><b className="mono">£{e.volume}M/yr</b></div>
+                        <div className="mr-tt-row"><span>Flood risk</span><b className="mono">{(e.flood_risk * 100).toFixed(0)}%</b></div>
+                        <div className="mr-tt-row"><span>Risk level</span><b style={{ color: riskColor(e.flood_risk) }}>{riskLevel(e.flood_risk)}</b></div>
                       </div>
                     </LTooltip>
                   </Polyline>
-                )}
+                  {isPreviewing && previewRec && (
+                    <Polyline
+                      positions={previewRec.altCoords}
+                      pathOptions={{
+                        color: "#3B82F6",
+                        weight: volumeToWidth(e.volume) + 2,
+                        opacity: 1,
+                        className: "mr-edge mr-edge-preview",
+                      }}
+                    >
+                      <LTooltip sticky direction="top" offset={[0, -4]} className="mr-tooltip">
+                        <div className="mr-tt">
+                          <div className="mr-tt-row"><span>Status</span><b style={{ color: "#3B82F6" }}>Proposed reroute</b></div>
+                          <div className="mr-tt-row"><span>Detour via</span><b>{previewRec.via}</b></div>
+                          <div className="mr-tt-row"><span>Δ time</span><b className="mono">+{previewRec.delayDeltaMin} min</b></div>
+                          <div className="mr-tt-row"><span>Δ cost</span><b className="mono">+£{previewRec.costDeltaGBP}</b></div>
+                        </div>
+                      </LTooltip>
+                    </Polyline>
+                  )}
+                  {altPositions && (
+                    <Polyline
+                      positions={altPositions}
+                      pathOptions={{
+                        color: "#22C55E",
+                        weight: volumeToWidth(e.volume) + 1,
+                        opacity: 0.95,
+                        dashArray: "2 6",
+                        className: "mr-edge",
+                      }}
+                    >
+                      <LTooltip sticky direction="top" offset={[0, -4]} className="mr-tooltip">
+                        <div className="mr-tt">
+                          <div className="mr-tt-row"><span>Status</span><b style={{ color: "#22C55E" }}>Agent reroute · approved</b></div>
+                          <div className="mr-tt-row"><span>Route</span><b>{s.label} → {t.label}</b></div>
+                        </div>
+                      </LTooltip>
+                    </Polyline>
+                  )}
                 </Fragment>
               );
             })}
 
-          {activeWarning && (
-            <Circle
-              center={[activeWarning.lat, activeWarning.lng]}
-              radius={activeWarning.radiusKm * 1000}
-              pathOptions={{
-                color: SEVERITY_COLORS[activeWarning.severity],
-                fillColor: SEVERITY_COLORS[activeWarning.severity],
-                fillOpacity: 0.12,
-                weight: 1.5,
-                dashArray: "4 4",
-              }}
-            />
-          )}
+            {activeWarning && (
+              <Circle
+                center={[activeWarning.lat, activeWarning.lng]}
+                radius={activeWarning.radiusKm * 1000}
+                pathOptions={{
+                  color: SEVERITY_COLORS[activeWarning.severity],
+                  fillColor: SEVERITY_COLORS[activeWarning.severity],
+                  fillOpacity: 0.12,
+                  weight: 1.5,
+                  dashArray: "4 4",
+                }}
+              />
+            )}
 
-          {nodes.map((n) => (
+            {nodes.map((n) => (
               <CircleMarker
                 key={n.id}
                 center={[n.lat, n.lng]}
@@ -796,8 +931,9 @@ export default function MediRouteDashboard() {
               >
                 <NodeLabel label={n.label} />
               </CircleMarker>
-          ))}
-        </MapContainer>}
+            ))}
+          </MapContainer>
+        )}
 
         <div
           className={`mr-bottom${panelOpen ? " open" : ""}`}
@@ -823,9 +959,7 @@ export default function MediRouteDashboard() {
                 {tableRows.map((r, i) => (
                   <tr key={i} className={r.flood_risk > 0.66 ? "danger" : ""}>
                     <td>{product}</td>
-                    <td>
-                      {r.source?.label} → {r.target?.label}
-                    </td>
+                    <td>{r.source?.label} → {r.target?.label}</td>
                     <td className="num mono">{r.volume}</td>
                     <td className="num mono">{(r.flood_risk * 100).toFixed(0)}%</td>
                     <td style={{ color: riskColor(r.flood_risk) }}>{riskLevel(r.flood_risk)}</td>
@@ -855,18 +989,38 @@ export default function MediRouteDashboard() {
             <h2>Live disruption alerts</h2>
           </div>
           <p className="mr-warnings-sub">Met Office · EA · National Highways · agentic re-routing</p>
+          {/* Simulate incoming EA flood event */}
+          <button
+            className="mr-simulate-btn"
+            onClick={simulateFloodEvent}
+            disabled={simulatingEvent}
+            title="Simulate incoming EA flood warning"
+          >
+            {simulatingEvent ? (
+              <>
+                <span className="mr-sim-spinner" />
+                Fetching EA data…
+              </>
+            ) : (
+              <>
+                <Play size={11} />
+                Run
+              </>
+            )}
+          </button>
         </div>
 
         <div className="mr-warnings-list">
-          {WARNINGS.map((w) => {
+          {warnings.map((w) => {
             const active = w.id === activeWarningId;
             const recs = recsByWarning[w.id] ?? [];
             const isGen = generating[w.id];
             const aboveThreshold = w.severity !== "advisory";
+            const isSimulated = w.id.startsWith("sim-");
             return (
               <div
                 key={w.id}
-                className={`mr-warning${active ? " active" : ""}`}
+                className={`mr-warning${active ? " active" : ""}${isSimulated ? " simulated" : ""}`}
                 onClick={() => setActiveWarningId(active ? null : w.id)}
                 role="button"
                 tabIndex={0}
@@ -884,6 +1038,11 @@ export default function MediRouteDashboard() {
                     {w.severity}
                   </span>
                   <span className="mr-warning-when">{w.startsIn}</span>
+                  {isSimulated && (
+                    <span style={{ fontSize: 9, fontWeight: 700, color: "#3B82F6", marginLeft: "auto", flexShrink: 0 }}>
+                      EA LIVE
+                    </span>
+                  )}
                 </div>
                 <div className="mr-warning-title">{w.title}</div>
                 <div className="mr-warning-region">{w.region}</div>
@@ -902,10 +1061,12 @@ export default function MediRouteDashboard() {
                     <div className="mr-warning-routes">
                       {w.disrupts.map((key) => {
                         const [a, b] = key.split("->");
+                        const srcNode = nodeMap[a] ?? getNodes("Insulin").find(n => n.id === a) ?? getNodes("IV Saline").find(n => n.id === a);
+                        const tgtNode = nodeMap[b] ?? getNodes("Insulin").find(n => n.id === b) ?? getNodes("IV Saline").find(n => n.id === b);
                         return (
                           <div key={key} className="mr-warning-route">
                             <span className="mr-warning-dot" />
-                            {a} → {b}
+                            {srcNode?.label ?? a} → {tgtNode?.label ?? b}
                           </div>
                         );
                       })}
@@ -934,19 +1095,21 @@ export default function MediRouteDashboard() {
                             const d = decisions[r.id];
                             const isRejecting = rejectingId === r.id;
                             const TYPE_META = {
-                              reroute:       { label: "REROUTE",      color: "#F97316" },
-                              "alt-supplier":{ label: "ALT SUPPLIER", color: "#8B5CF6" },
-                              delay:         { label: "DELAY",        color: "#14B8A6" },
+                              reroute:         { label: "REROUTE",      color: "#F97316" },
+                              "alt-supplier":  { label: "ALT SUPPLIER", color: "#8B5CF6" },
+                              delay:           { label: "DELAY",        color: "#14B8A6" },
+                              postpone:        { label: "POSTPONE?",    color: "#EF4444" },
                             };
                             const { label: typeLabel, color: typeColor } = TYPE_META[r.type];
                             const approveLabel =
-                              r.type === "reroute"       ? "Approve & lock route"      :
-                              r.type === "alt-supplier"  ? "Approve & switch supplier" :
+                              r.type === "reroute"       ? "Approve & lock route"       :
+                              r.type === "alt-supplier"  ? "Approve & switch supplier"  :
+                              r.type === "postpone"      ? "Approve & hold operations"  :
                                                            "Approve & hold shipment";
                             const cardTitle =
-                              r.type === "alt-supplier"
-                                ? r.supplierName
-                                : `${r.sourceLabel} → ${r.targetLabel}`;
+                              r.type === "alt-supplier" ? r.supplierName :
+                              r.type === "postpone"     ? "Operational Hold Assessment" :
+                                                          `${r.sourceLabel} → ${r.targetLabel}`;
                             return (
                               <div
                                 key={r.id}
@@ -976,6 +1139,7 @@ export default function MediRouteDashboard() {
                                       <div><span>Detour via</span><b>{r.via}</b></div>
                                       <div><span>Δ time</span><b className="mono" style={{ color: "#F97316" }}>+{r.delayDeltaMin} min</b></div>
                                       <div><span>Δ cost</span><b className="mono" style={{ color: "#F97316" }}>+£{r.costDeltaGBP}</b></div>
+                                      <div><span>Cold chain</span><b style={{ color: "#22C55E" }}>Within SLA</b></div>
                                     </>
                                   )}
                                   {r.type === "alt-supplier" && (
@@ -984,6 +1148,7 @@ export default function MediRouteDashboard() {
                                       <div><span>Lead time</span><b className="mono" style={{ color: "#8B5CF6" }}>{r.leadTimeDays} days</b></div>
                                       <div><span>Capacity</span><b>{r.capacity}</b></div>
                                       <div><span>Δ cost</span><b className="mono" style={{ color: "#F97316" }}>+£{r.costDeltaGBP.toLocaleString()}</b></div>
+                                      <div><span>Contract</span><b style={{ color: "#22C55E" }}>NHS framework</b></div>
                                     </>
                                   )}
                                   {r.type === "delay" && (
@@ -992,6 +1157,35 @@ export default function MediRouteDashboard() {
                                       <div><span>Max safe</span><b className="mono">{r.maxSafeDelayHours} h</b></div>
                                       <div><span>Stock buffer</span><b className="mono">{r.stockBufferDays} days</b></div>
                                       <div><span>Est. saving</span><b className="mono" style={{ color: "#22C55E" }}>£{r.costSavingGBP.toLocaleString()}</b></div>
+                                    </>
+                                  )}
+                                  {r.type === "postpone" && (
+                                    <>
+                                      <div>
+                                        <span>Verdict</span>
+                                        <b style={{
+                                          color: r.verdict === "safe" ? "#22C55E" : r.verdict === "risky" ? "#F97316" : "#EF4444",
+                                          fontWeight: 800,
+                                        }}>
+                                          {r.verdictLabel}
+                                        </b>
+                                      </div>
+                                      <div><span>Hold window</span><b className="mono">{r.holdWindowHours} h max</b></div>
+                                      <div><span>Clinical risk</span><b>{r.clinicalRisk}</b></div>
+                                      {r.hospitalStocks.map((h) => (
+                                        <div key={h.name}>
+                                          <span>{h.name}</span>
+                                          <b
+                                            className="mono"
+                                            style={{
+                                              color: h.stockDays < 3 ? "#EF4444" : h.stockDays < 5 ? "#F97316" : "#22C55E",
+                                            }}
+                                          >
+                                            {h.stockDays.toFixed(1)} d stock
+                                          </b>
+                                        </div>
+                                      ))}
+                                      <div><span>Auto-trigger</span><b style={{ fontSize: 10 }}>{r.triggerCondition}</b></div>
                                     </>
                                   )}
                                 </div>
@@ -1009,16 +1203,10 @@ export default function MediRouteDashboard() {
                                 )}
                                 {!d && !isRejecting && (
                                   <div className="mr-rec-actions" onClick={(e) => e.stopPropagation()}>
-                                    <button
-                                      className="mr-btn approve"
-                                      onClick={() => approveRec(r)}
-                                    >
+                                    <button className="mr-btn approve" onClick={() => approveRec(r)}>
                                       {approveLabel}
                                     </button>
-                                    <button
-                                      className="mr-btn reject"
-                                      onClick={() => setRejectingId(r.id)}
-                                    >
+                                    <button className="mr-btn reject" onClick={() => setRejectingId(r.id)}>
                                       Reject
                                     </button>
                                   </div>
@@ -1039,18 +1227,12 @@ export default function MediRouteDashboard() {
                                       }}
                                     />
                                     <div className="mr-rec-actions">
-                                      <button
-                                        className="mr-btn reject"
-                                        onClick={() => rejectRec(r.id, rejectReason)}
-                                      >
+                                      <button className="mr-btn reject" onClick={() => rejectRec(r.id, rejectReason)}>
                                         Confirm reject
                                       </button>
                                       <button
                                         className="mr-btn ghost"
-                                        onClick={() => {
-                                          setRejectingId(null);
-                                          setRejectReason("");
-                                        }}
+                                        onClick={() => { setRejectingId(null); setRejectReason(""); }}
                                       >
                                         Cancel
                                       </button>

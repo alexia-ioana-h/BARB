@@ -578,3 +578,43 @@ body { font-family: 'Inter', system-ui, sans-serif; }
 .mr-graph-edge {
   transition: stroke-opacity 0.25s ease, stroke-width 0.2s ease;
 }
+
+/* Simulate Event button */
+.mr-simulate-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-top: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  background: rgba(59,130,246,0.12);
+  border: 1px solid rgba(59,130,246,0.4);
+  border-radius: 6px;
+  color: #93c5fd;
+  font-size: 12px; font-weight: 600; font-family: inherit;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  transition: background 0.15s, border-color 0.15s;
+  justify-content: center;
+}
+.mr-simulate-btn:hover:not(:disabled) {
+  background: rgba(59,130,246,0.2);
+  border-color: rgba(59,130,246,0.65);
+  color: #bfdbfe;
+}
+.mr-simulate-btn:disabled { cursor: wait; opacity: 0.7; }
+
+.mr-sim-spinner {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid rgba(147,197,253,0.3);
+  border-top-color: #93c5fd;
+  animation: mr-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes mr-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Simulated (EA-live) warning card gets a subtle blue accent */
+.mr-warning.simulated {
+  border-left-width: 3px;
+  box-shadow: 0 0 0 1px rgba(59,130,246,0.15), inset 0 0 20px rgba(59,130,246,0.04);
+}
