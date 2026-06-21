@@ -490,7 +490,7 @@ export default function MediRouteDashboard() {
       description: template.description + liveStationNote,
     };
 
-    setWarnings((prev) => [...prev, newWarning]);
+    setWarnings((prev) => [newWarning, ...prev]);
     setActiveWarningId(newWarning.id);
     setSimulatingEvent(false);
   }

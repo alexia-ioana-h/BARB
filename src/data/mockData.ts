@@ -192,7 +192,7 @@ export const WARNINGS: WeatherWarning[] = [
     lat: 51.5,
     lng: 0.35,
     radiusKm: 55,
-    startsIn: "in 6 h",
+    startsIn: "6 hours ago",
     duration: "36 h",
     issued: "Met Office · 14:20 UTC",
     description:
