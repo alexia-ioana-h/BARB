@@ -251,17 +251,35 @@ function approxPlaceName(p: LL): string {
   return best.name;
 }
 
-function NodeLabel({ label }: { label: string }) {
+function NodeLabel({ label, sub }: { label: string; sub?: string }) {
   return (
     <LTooltip permanent direction="top" offset={[0, -8]} className="mr-node-label">
       {label}
+      {sub ? <span className="mr-node-sub"> · {sub}</span> : null}
     </LTooltip>
   );
+}
+
+// GP insulin volume → marker radius. Range derived from current GP set (~16k–30k units).
+function gpRadius(volume: number) {
+  const min = 15000;
+  const max = 32000;
+  const t = Math.max(0, Math.min(1, (volume - min) / (max - min)));
+  return 8 + t * 12; // 8–20 px
+}
+
+// Hospital saline volume → marker radius. Range derived from current trust set (~12k–193k DDDs/7yr).
+function hospitalSalineRadius(volume: number) {
+  const min = 12000;
+  const max = 193000;
+  const t = Math.max(0, Math.min(1, (volume - min) / (max - min)));
+  return 8 + t * 14; // 8–22 px
 }
 
 export default function MediRouteDashboard() {
   const [product, setProduct] = useState<Product>("Insulin");
   const [viewMode, setViewMode] = useState<"international" | "domestic">("international");
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     if (typeof window !== "undefined") {
       return (localStorage.getItem("mr-theme") as "dark" | "light") || "dark";
@@ -628,21 +646,63 @@ export default function MediRouteDashboard() {
             />
           )}
 
-          {nodes.map((n) => (
+          {nodes
+            .filter((n) => {
+              // GPs, wholesalers, and saline-sized hospitals are domestic-only detail nodes.
+              if (viewMode === "international") {
+                if (n.type === "gp_practice" || n.type === "wholesaler") return false;
+                if (n.type === "hospital" && (n as { salineVolume?: number }).salineVolume != null) return false;
+              }
+              return true;
+            })
+            .map((n) => {
+            const isGp = n.type === "gp_practice";
+            const insulinVol = (n as { insulinVolume?: number }).insulinVolume;
+            const salineVol = (n as { salineVolume?: number }).salineVolume;
+            const trust = (n as { trust?: string }).trust;
+            const isSizedHospital = n.type === "hospital" && salineVol != null;
+            const radius = isGp && insulinVol
+              ? gpRadius(insulinVol)
+              : isSizedHospital
+                ? hospitalSalineRadius(salineVol!)
+                : 7;
+            const sub = isGp && insulinVol
+              ? `${insulinVol.toLocaleString()} u/yr`
+              : undefined;
+            return (
               <CircleMarker
                 key={n.id}
                 center={[n.lat, n.lng]}
-                radius={7}
+                radius={radius}
                 pathOptions={{
                   color: theme === "dark" ? "#0f1117" : "#ffffff",
                   weight: 2,
                   fillColor: NODE_COLORS[n.type as keyof typeof NODE_COLORS],
-                  fillOpacity: 1,
+                  fillOpacity: isGp || isSizedHospital ? 0.85 : 1,
                 }}
+                eventHandlers={isSizedHospital ? {
+                  mouseover: () => setHoveredNodeId(n.id),
+                  mouseout: () => setHoveredNodeId((prev) => (prev === n.id ? null : prev)),
+                } : undefined}
               >
-                <NodeLabel label={n.label} />
+                {isSizedHospital ? (
+                  <LTooltip permanent direction="top" offset={[0, -8]} className="mr-node-label">
+                    <div>{n.label}</div>
+                    {hoveredNodeId === n.id && (
+                      <div className="mr-node-detail">
+                        {trust && <div className="mr-node-detail-row">{trust}</div>}
+                        <div className="mr-node-detail-row mono">
+                          {salineVol!.toLocaleString()} DDDs / 7yr
+                        </div>
+                      </div>
+                    )}
+                  </LTooltip>
+                ) : (
+                  <NodeLabel label={n.label} sub={sub} />
+                )}
               </CircleMarker>
-          ))}
+            );
+          })}
         </MapContainer>
 
         <div

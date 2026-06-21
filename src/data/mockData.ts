@@ -6,6 +6,8 @@ export const NODE_COLORS = {
   national_wh: "#F97316",
   regional_wh: "#F59E0B",
   hospital: "#14B8A6",
+  gp_practice: "#EC4899",
+  wholesaler: "#E11D48",
 };
 
 export const NODE_TYPE_LABELS = {
@@ -14,9 +16,11 @@ export const NODE_TYPE_LABELS = {
   national_wh: "National warehouse",
   regional_wh: "Regional warehouse",
   hospital: "Hospital",
+  gp_practice: "GP practice",
+  wholesaler: "Wholesaler",
 };
 
-const baseNodes = [
+const commonNodes = [
   { id: "glooko", label: "Glooko HQ", type: "manufacturer", lat: 37.4419, lng: -122.143 },
   { id: "abbott", label: "Abbott Kilkenny Plant", type: "manufacturer", lat: 52.6541, lng: -7.2448 },
   { id: "menarini", label: "Menarini Florence", type: "manufacturer", lat: 43.7696, lng: 11.2558 },
@@ -39,9 +43,39 @@ const baseNodes = [
   { id: "mri", label: "Manchester RI", type: "hospital", lat: 53.46, lng: -2.23 },
   { id: "lgi", label: "Leeds General", type: "hospital", lat: 53.8, lng: -1.56 },
   { id: "bri", label: "Bristol Royal", type: "hospital", lat: 51.46, lng: -2.6 },
+] as Array<{ id: string; label: string; type: string; lat: number; lng: number; insulinVolume?: number; salineVolume?: number; trust?: string; region?: string }>;
+
+// Insulin-only: GP practices + wholesaler depots
+const insulinOnlyNodes: typeof commonNodes = [
+  // GP Practices — Essex coast (131 flood alerts 2018–2023, highest of any English area per EA data)
+  { id: "gp_colchester", label: "Colchester Medical Practice", type: "gp_practice", lat: 51.89, lng: 0.9093, insulinVolume: 30359, region: "Essex Coast" },
+  { id: "gp_abbey", label: "Abbey Field Medical Centre", type: "gp_practice", lat: 51.8775, lng: 0.8986, insulinVolume: 17439, region: "Essex Coast" },
+  // GP Practices — West Midlands (highest flood-alert count of any English region, 4,107 alerts / 5 yrs)
+  { id: "gp_westgate", label: "The Westgate Practice", type: "gp_practice", lat: 52.6835, lng: -1.8211, insulinVolume: 21244, region: "West Midlands" },
+  { id: "gp_winyates", label: "Winyates Health Centre", type: "gp_practice", lat: 52.3033, lng: -1.8945, insulinVolume: 16751, region: "West Midlands" },
+  // Illustrative wholesaler depots
+  { id: "wh_aah", label: "AAH Pharmaceuticals — Regional Depot", type: "wholesaler", lat: 52.4, lng: -1.9, region: "West Midlands" },
+  { id: "wh_alliance", label: "Alliance Healthcare — Regional Depot", type: "wholesaler", lat: 51.9, lng: 0.7, region: "Essex" },
 ];
 
-const salineExtraNodes: typeof baseNodes = [];
+// IV Saline-only: NHS Trust hospital sites in flood-documented regions, sized by 7-yr DDD quantity.
+const salineOnlyNodes: typeof commonNodes = [
+  { id: "h_qe_birm", label: "Queen Elizabeth Hospital Birmingham", type: "hospital", lat: 52.4506, lng: -1.9305, salineVolume: 193000, trust: "University Hospitals Birmingham NHS Foundation Trust", region: "West Midlands" },
+  { id: "h_newcross", label: "New Cross Hospital", type: "hospital", lat: 52.6122, lng: -2.1067, salineVolume: 37500, trust: "The Royal Wolverhampton NHS Trust", region: "West Midlands" },
+  { id: "h_russells", label: "Russells Hall Hospital", type: "hospital", lat: 52.5095, lng: -2.1146, salineVolume: 26100, trust: "The Dudley Group NHS Foundation Trust", region: "West Midlands" },
+  { id: "h_sandwell", label: "Sandwell General Hospital", type: "hospital", lat: 52.5095, lng: -1.9650, salineVolume: 12200, trust: "Sandwell And West Birmingham Hospitals NHS Trust", region: "West Midlands" },
+  { id: "h_colchester", label: "Colchester Hospital", type: "hospital", lat: 51.8959, lng: 0.8919, salineVolume: 84500, trust: "East Suffolk And North Essex NHS Foundation Trust", region: "Essex Coast" },
+  { id: "h_southend", label: "Southend University Hospital", type: "hospital", lat: 51.5523, lng: 0.7077, salineVolume: 81200, trust: "Mid And South Essex NHS Foundation Trust", region: "Essex Coast" },
+  { id: "h_jpaget", label: "James Paget University Hospital", type: "hospital", lat: 52.6035, lng: 1.6906, salineVolume: 13700, trust: "James Paget University Hospitals NHS Foundation Trust", region: "East Coast Norfolk" },
+  { id: "h_nnuh", label: "Norfolk and Norwich University Hospital", type: "hospital", lat: 52.6183, lng: 1.2189, salineVolume: 16100, trust: "Norfolk And Norwich University Hospitals NHS Foundation Trust", region: "East Coast Norfolk" },
+  { id: "h_hull", label: "Hull Royal Infirmary", type: "hospital", lat: 53.7445, lng: -0.3429, salineVolume: 92600, trust: "Hull University Teaching Hospitals NHS Trust", region: "East Coast Humber" },
+  { id: "h_grimsby", label: "Diana Princess of Wales Hospital, Grimsby", type: "hospital", lat: 53.5719, lng: -0.0848, salineVolume: 74400, trust: "Northern Lincolnshire And Goole NHS Foundation Trust", region: "East Coast Lincolnshire" },
+  { id: "h_lincoln", label: "Lincoln County Hospital", type: "hospital", lat: 53.2353, lng: -0.5277, salineVolume: 45800, trust: "United Lincolnshire Teaching Hospitals NHS Trust", region: "Lincolnshire Fens" },
+  { id: "h_taunton", label: "Musgrove Park Hospital, Taunton", type: "hospital", lat: 51.0148, lng: -3.1336, salineVolume: 37100, trust: "Somerset NHS Foundation Trust", region: "Somerset Levels" },
+  { id: "h_weston", label: "Weston General Hospital", type: "hospital", lat: 51.3458, lng: -2.9764, salineVolume: 182900, trust: "University Hospitals Bristol And Weston NHS Foundation Trust", region: "Somerset Coast" },
+  { id: "h_carlisle", label: "Cumberland Infirmary, Carlisle", type: "hospital", lat: 54.8951, lng: -2.9572, salineVolume: 51800, trust: "North Cumbria Integrated Care NHS Foundation Trust", region: "Cumbria" },
+  { id: "h_lancaster", label: "Royal Lancaster Infirmary", type: "hospital", lat: 54.0489, lng: -2.7944, salineVolume: 30700, trust: "University Hospitals Of Morecambe Bay NHS Foundation Trust", region: "Cumbria Coast" },
+];
 
 const insulinEdges = [
   { sourceId: "glooko", targetId: "heath", volume: 60, flood_risk: 0.1 },
@@ -80,7 +114,9 @@ const salineEdges = [
 ];
 
 export function getNodes(product: string) {
-  return product === "IV Saline" ? [...baseNodes, ...salineExtraNodes] : baseNodes;
+  return product === "IV Saline"
+    ? [...commonNodes, ...salineOnlyNodes]
+    : [...commonNodes, ...insulinOnlyNodes];
 }
 
 export function getEdges(product: string) {
